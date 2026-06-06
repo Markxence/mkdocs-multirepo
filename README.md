@@ -44,6 +44,9 @@ Options:
   --scan PATH Scan a directory for local MkDocs projects (directories
               containing an mkdocs.yml) and add them as local repos.
               Repeatable.
+  --convert-mdbook PATH
+              Convert mdBook projects (book.toml) found under a directory
+              into MkDocs-Material projects in place. Repeatable.
 ```
 
 ### Scanning for local projects
@@ -72,6 +75,29 @@ scan_dirs:
 ```
 
 When scanning, `config.yml` only needs the general settings (`target_dir`, `index_tpl`, etc.); the `repos` list is optional.
+
+### Converting mdBook projects
+
+If some of your documentation is written with [mdBook](https://rust-lang.github.io/mdBook/) rather than MkDocs, multirepo can convert it so that `--scan` picks it up:
+
+```
+mkdocs-multirepo --convert-mdbook /path/to/projects
+```
+
+This walks the path, and for every mdBook project (a directory containing a `book.toml`) writes an MkDocs-Material project **in place**, next to the `book.toml`:
+
+- `book.toml` `title`/`description`/`authors`/`language` map to `site_name`/`site_description`/`site_author`/`theme.language`.
+- `theme` is set to `material`.
+- `src/SUMMARY.md` is parsed into a hierarchical `nav` (part headings become sections, nested list items become sub-pages).
+- `src/` markdown is copied into `docs/`, and the first chapter is renamed to `index.md` so the project has a home page.
+
+Projects that already have a `mkdocs.yml` or `docs/` directory are skipped (not overwritten). mdBook preprocessor syntax (`{{#include}}`, hidden code lines) is **not** translated; affected projects are reported so you can fix them by hand. Conversion requires Python 3.11+ (uses `tomllib`).
+
+A typical end-to-end run converts then scans then builds:
+
+```
+mkdocs-multirepo --convert-mdbook ~/projects --scan ~/projects --build
+```
 
 Scanned projects whose `mkdocs.yml` is byte-for-byte identical (the same project copied to several locations) are deduplicated automatically; only the first occurrence is kept.
 

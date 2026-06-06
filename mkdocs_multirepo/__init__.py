@@ -28,8 +28,16 @@ class DefaultHelp(click.Command):
 @click.option("--update", help="Update the repos, i.e., the Git submodules.", is_flag=True, show_default=True)
 @click.option("--build", help="Build all MkDocs projects and generate the landing page.", is_flag=True, show_default=True)
 @click.option("--scan", "scan_paths", help="Scan a directory for local MkDocs projects (dirs containing mkdocs.yml) and add them as local repos. Repeatable.", multiple=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--convert-mdbook", "convert_mdbook", help="Convert mdBook projects (book.toml) found under a directory into MkDocs-Material projects in place. Repeatable.", multiple=True, type=click.Path(exists=True, file_okay=False))
 
-def cli(init, update, build, scan_paths):
+def cli(init, update, build, scan_paths, convert_mdbook):
+
+    # Convert mdBook projects first so a subsequent --scan picks them up.
+    if convert_mdbook:
+        from .mdbook import convertMdbook
+        convertMdbook(list(convert_mdbook))
+        if not (init or update or build or scan_paths):
+            return
 
     config = loadConfig()
 
