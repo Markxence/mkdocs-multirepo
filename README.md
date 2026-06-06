@@ -41,7 +41,52 @@ Options:
   --update    Update the repos, i.e., the Git submodules.  [default: False]
   --build     Build all MkDocs projects and generate the landing page.
               [default: False]
+  --scan PATH Scan a directory for local MkDocs projects (directories
+              containing an mkdocs.yml) and add them as local repos.
+              Repeatable.
 ```
+
+### Scanning for local projects
+
+Instead of (or in addition to) declaring remote repos in `config.yml`, you can let multirepo discover MkDocs projects already present on your filesystem. A project is any directory that directly contains an `mkdocs.yml`.
+
+```
+mkdocs-multirepo --scan /path/to/projects --build
+```
+
+This walks the given path, and for every `mkdocs.yml` found:
+
+- adds it as a **local repo** (built in place, no Git submodule, so `--init`/`--update` skip it),
+- derives `name` from the directory name (deduplicated on collision),
+- derives `title` from the project's `site_name`,
+- uses no image (the landing-page entry is rendered without an icon).
+
+Directories named `.git`, `node_modules`, `site`, `__pycache__`, `.venv`, `venv`, `.tox`, `.eggs` are skipped, and a project's own subtree is not descended into (so a nested `docs/mkdocs.yml` is ignored). The `--scan` option can be given multiple times.
+
+You can also declare scan roots in `config.yml` instead of on the command line:
+
+```yml
+scan_dirs:
+  - /path/to/projects
+  - /another/path
+```
+
+When scanning, `config.yml` only needs the general settings (`target_dir`, `index_tpl`, etc.); the `repos` list is optional.
+
+Scanned projects whose `mkdocs.yml` is byte-for-byte identical (the same project copied to several locations) are deduplicated automatically; only the first occurrence is kept.
+
+### Landing-page layout
+
+Set `layout` in `config.yml` to choose how projects are rendered on the landing page:
+
+```yml
+layout: cards   # or: list (default)
+```
+
+- `list` (default): the classic `<ul>/<li>` markup, backward compatible with existing templates and stylesheets.
+- `cards`: a responsive grid of cards, each showing the project's `site_name` as title, its directory name as a subtitle (so projects sharing a `site_name` stay distinct), and its `site_description` as body text. A self-contained stylesheet is injected automatically, so no extra CSS file is required.
+
+A `<meta charset="utf-8">` tag is injected into the generated page when missing, so accented titles and dashes render correctly.
 
 ## Configuration
 

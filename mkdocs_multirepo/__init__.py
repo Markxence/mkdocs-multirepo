@@ -1,8 +1,14 @@
 import yaml
 import os
+import re
+import hashlib
 import click
 from bs4 import BeautifulSoup
 from shutil import copy2
+
+# Directories never worth descending into when scanning for MkDocs projects.
+SCAN_IGNORE_DIRS = {".git", "node_modules", "site", "__pycache__",
+                    ".venv", "venv", ".tox", ".eggs"}
 
 class DefaultHelp(click.Command):
     def __init__(self, *args, **kwargs):
@@ -21,16 +27,29 @@ class DefaultHelp(click.Command):
 @click.option("--init", help="Initialize the repos as Git submodules.", is_flag=True, show_default=True)
 @click.option("--update", help="Update the repos, i.e., the Git submodules.", is_flag=True, show_default=True)
 @click.option("--build", help="Build all MkDocs projects and generate the landing page.", is_flag=True, show_default=True)
+@click.option("--scan", "scan_paths", help="Scan a directory for local MkDocs projects (dirs containing mkdocs.yml) and add them as local repos. Repeatable.", multiple=True, type=click.Path(exists=True, file_okay=False))
 
-def cli(init, update, build):
+def cli(init, update, build, scan_paths):
 
     config = loadConfig()
+
+    # Discover local MkDocs projects from --scan paths and/or the scan_dirs
+    # config key, and append them to the repos list as local (non-submodule) entries.
+    scan_roots = list(scan_paths) + list(config.get("scan_dirs", []))
+    if scan_roots:
+        used_names = {repo["name"] for repo in config["repos"] if "name" in repo}
+        scanned = scanProjects(scan_roots, used_names)
+        click.echo("Scanned " + str(len(scanned)) + " local MkDocs project(s).")
+        config["repos"].extend(scanned)
 
     if init:
         # Initialize the repos as Git submodules
         click.echo("Adding submodules ...")
         cwd = os.path.abspath(os.getcwd())
         for repo in config["repos"]:
+            if "local_path" in repo:
+                # Local (scanned) project: built in place, not a submodule.
+                continue
             # Add repo as git submodule
             repo_dir = os.path.abspath(config["repos_dir"] + os.path.sep + repo["name"])
             os.system("git -c http.sslVerify=false submodule add " + repo["url"] + " " + repo_dir)
@@ -53,22 +72,40 @@ def cli(init, update, build):
         # Copy image files and build projects
         click.echo("Building projects ...")
         cwd = os.path.abspath(os.getcwd())
+        os.makedirs(config["target_dir"], exist_ok=True)
+        built_repos = []
+        failed_repos = []
         for repo in config["repos"]:
-            repo_dir = os.path.abspath(config["repos_dir"] + os.path.sep + repo["name"])
+            if "local_path" in repo:
+                # Local (scanned) project: build straight from its directory.
+                repo_dir = repo["local_path"]
+            else:
+                repo_dir = os.path.abspath(config["repos_dir"] + os.path.sep + repo["name"])
             if not "mkdocs_dir" in repo:
                 repo["mkdocs_dir"] = "."
             if not "mkdocs_config" in repo:
                 repo["mkdocs_config"] = "mkdocs.yml"
-            
-
-            repo_target_image = os.path.abspath(config["target_dir"] + os.path.sep + repo["image"])
-            os.makedirs(os.path.dirname(repo_target_image), exist_ok=True)
-            copy2(repo["image"], repo_target_image)
 
             repo_site_dir = os.path.abspath(config["target_dir"] + os.path.sep + repo["name"])
             os.chdir(repo_dir + os.path.sep + repo["mkdocs_dir"])
-            os.system("mkdocs build --config-file " + repo["mkdocs_config"] + " --site-dir " + repo_site_dir)
+            rc = os.system("mkdocs build --config-file " + repo["mkdocs_config"] + " --site-dir " + repo_site_dir)
             os.chdir(cwd)
+
+            if rc != 0:
+                # Build failed (e.g. missing theme/plugin); skip it so the
+                # landing page doesn't link to a project that wasn't built.
+                failed_repos.append(repo["name"])
+                continue
+
+            if "image" in repo:
+                repo_target_image = os.path.abspath(config["target_dir"] + os.path.sep + repo["image"])
+                os.makedirs(os.path.dirname(repo_target_image), exist_ok=True)
+                copy2(repo["image"], repo_target_image)
+
+            built_repos.append(repo)
+
+        if failed_repos:
+            click.echo("Skipped " + str(len(failed_repos)) + " project(s) that failed to build: " + ", ".join(failed_repos))
 
         # Copy extra files
         if "extra_files" in config:
@@ -80,39 +117,21 @@ def cli(init, update, build):
         # Generate index.html based on template
         click.echo("Generating landing page ...")
         soup = loadTemplate(config["index_tpl"])
-        # Add unordered list as child of element_id
+        ensureCharset(soup)
+        layout = config.get("layout", "list")
+        if layout == "cards":
+            injectCardStyles(soup)
         element = soup.find(id=config["element_id"])
-        if element.ul is None:
-            element.insert(1, soup.new_tag("ul"))
-        for repo in config["repos"]:
-            # Add a list item for each repo
-            index_html = "index.html"
-
+        for repo in built_repos:
+            index_html = repo["index_html"] if "index_html" in repo else "index.html"
             repo_element = element
             if "element_id" in repo:
                 repo_element = soup.find(id=repo["element_id"])
-                if repo_element.ul is None:
-                    repo_element.insert(1, soup.new_tag("ul"))
-
-            if "index_html" in repo:
-                index_html = repo["index_html"]
-
-            list_tag = soup.new_tag("li")
-            anchor_tag = soup.new_tag("a", href=repo["name"] + "/" + index_html)
-            image_tag = soup.new_tag("img", src=repo["image"])
-            heading_tag = soup.new_tag("span")
-            heading_tag.string = repo["title"]
-
-            anchor_tag.insert(1, image_tag)
-            anchor_tag.insert(1, heading_tag)
-            list_tag.insert(1, anchor_tag)
-
-            if "pdf" in repo:
-                a_tag = soup.new_tag("a", href=repo["name"] + "/" + repo["pdf"])
-                a_tag.string = 'pdf'
-                list_tag.insert(1, a_tag)
-
-            repo_element.ul.insert(1, list_tag)
+            href = repo["name"] + "/" + index_html
+            if layout == "cards":
+                appendCard(soup, repo_element, repo, href)
+            else:
+                appendListItem(soup, repo_element, repo, href)
 
         # Write index.html
         with open(config["target_dir"] + "/index.html", "w", encoding="utf8") as htmlfile:
@@ -125,6 +144,8 @@ def loadConfig():
     try:
         config = yaml.safe_load(configfile)
         # Set defaults
+        if not "repos" in config:
+            config["repos"] = []
         if not "repos_dir" in config:
             config["repos_dir"] = os.getcwd()
         if not "target_dir" in config:
@@ -137,6 +158,139 @@ def loadConfig():
     finally:
         configfile.close()
     return config
+
+def scanProjects(roots, used_names):
+    # Walk the given roots and return a repo entry for every directory that
+    # directly contains an mkdocs.yml. Such a directory is treated as a project
+    # root and is not descended into, so nested docs/mkdocs.yml are ignored.
+    projects = []
+    seen_hashes = set()
+    duplicates = 0
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(os.path.abspath(root)):
+            if "mkdocs.yml" in filenames:
+                config_path = os.path.join(dirpath, "mkdocs.yml")
+                # Don't descend into a project's own subtree.
+                dirnames[:] = []
+                # Skip copies of the same project (identical mkdocs.yml).
+                with open(config_path, "rb") as f:
+                    config_hash = hashlib.sha256(f.read()).hexdigest()
+                if config_hash in seen_hashes:
+                    duplicates += 1
+                    continue
+                seen_hashes.add(config_hash)
+                name = uniqueName(os.path.basename(dirpath) or "project", used_names)
+                used_names.add(name)
+                projects.append({
+                    "name": name,
+                    "title": extractMkdocsField(config_path, "site_name") or name,
+                    "description": extractMkdocsField(config_path, "site_description") or "",
+                    "local_path": dirpath,
+                    "mkdocs_config": "mkdocs.yml",
+                })
+                continue
+            # Prune noise directories before descending.
+            dirnames[:] = [d for d in dirnames if d not in SCAN_IGNORE_DIRS]
+    if duplicates:
+        click.echo("Skipped " + str(duplicates) + " duplicate project copy/copies.")
+    return projects
+
+def uniqueName(name, used_names):
+    if name not in used_names:
+        return name
+    i = 2
+    while name + "-" + str(i) in used_names:
+        i += 1
+    return name + "-" + str(i)
+
+def extractMkdocsField(config_path, field):
+    # Read a top-level scalar field (e.g. site_name, site_description) from an
+    # mkdocs.yml without a full YAML parse, which would choke on MkDocs' custom
+    # tags (e.g. !!python/name).
+    field_re = re.compile(r"^" + re.escape(field) + r":\s*(.+?)\s*$")
+    with open(config_path, encoding="utf8") as f:
+        for line in f:
+            match = field_re.match(line)
+            if match:
+                return match.group(1).strip("'\"")
+    return None
+
+def ensureCharset(soup):
+    # Without an explicit charset the browser may render the UTF-8 output as
+    # Latin-1, mangling accents and dashes. Inject one if absent.
+    head = soup.head
+    if head is None:
+        return
+    if head.find("meta", charset=True) is None:
+        head.insert(0, soup.new_tag("meta", charset="utf-8"))
+
+def appendListItem(soup, container, repo, href):
+    if container.ul is None:
+        container.insert(1, soup.new_tag("ul"))
+    list_tag = soup.new_tag("li")
+    anchor_tag = soup.new_tag("a", href=href)
+    heading_tag = soup.new_tag("span")
+    heading_tag.string = repo["title"]
+    if "image" in repo:
+        anchor_tag.insert(1, soup.new_tag("img", src=repo["image"]))
+    anchor_tag.insert(1, heading_tag)
+    list_tag.insert(1, anchor_tag)
+    if "pdf" in repo:
+        pdf_tag = soup.new_tag("a", href=repo["name"] + "/" + repo["pdf"])
+        pdf_tag.string = "pdf"
+        list_tag.insert(1, pdf_tag)
+    container.ul.insert(1, list_tag)
+
+def appendCard(soup, container, repo, href):
+    # Cards live in a flex/grid wrapper created once per container.
+    grid = container.find("div", class_="mr-grid")
+    if grid is None:
+        grid = soup.new_tag("div")
+        grid["class"] = "mr-grid"
+        container.append(grid)
+    card = soup.new_tag("a", href=href)
+    card["class"] = "mr-card"
+    title_tag = soup.new_tag("h3")
+    title_tag.string = repo["title"]
+    card.append(title_tag)
+    # Folder name as a subtitle, so projects sharing a site_name stay distinct.
+    sub_tag = soup.new_tag("div")
+    sub_tag["class"] = "mr-sub"
+    sub_tag.string = repo["name"]
+    card.append(sub_tag)
+    if repo.get("description"):
+        desc_tag = soup.new_tag("p")
+        desc_tag.string = repo["description"]
+        card.append(desc_tag)
+    if "pdf" in repo:
+        pdf_tag = soup.new_tag("span")
+        pdf_tag["class"] = "mr-pdf"
+        pdf_tag.string = "PDF"
+        card.append(pdf_tag)
+    grid.append(card)
+
+def injectCardStyles(soup):
+    # Self-contained default styling so the cards layout looks good with no
+    # extra files. Skipped if the template already ships an mr-card rule.
+    head = soup.head
+    if head is None or "mr-card" in soup.get_text():
+        return
+    style = soup.new_tag("style")
+    style.string = (
+        ".mr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));"
+        "gap:1rem;padding:1rem;max-width:1100px;margin:0 auto;}"
+        ".mr-card{display:block;padding:1.1rem 1.2rem;border:1px solid #e2e2e2;border-radius:10px;"
+        "text-decoration:none;color:inherit;background:#fff;transition:box-shadow .15s,transform .15s;}"
+        ".mr-card:hover{box-shadow:0 6px 20px rgba(0,0,0,.10);transform:translateY(-2px);}"
+        ".mr-card h3{margin:0 0 .15rem;font-size:1.05rem;color:#1c1c1c;}"
+        ".mr-sub{margin:0 0 .5rem;font-size:.72rem;color:#999;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}"
+        ".mr-card p{margin:0;color:#666;font-size:.9rem;line-height:1.4;}"
+        ".mr-pdf{display:inline-block;margin-top:.6rem;font-size:.72rem;font-weight:600;"
+        "letter-spacing:.04em;color:#a33;border:1px solid #a33;border-radius:4px;padding:.1rem .4rem;}"
+        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#fafafa;margin:0;}"
+    )
+    if head is not None:
+        head.append(style)
 
 def loadTemplate(index_file):
     templatefile = open(index_file)
