@@ -261,10 +261,15 @@ def appendCard(soup, container, repo, href):
     title_tag = soup.new_tag("h3")
     title_tag.string = repo["title"]
     card.append(title_tag)
-    # Folder name as a subtitle, so projects sharing a site_name stay distinct.
+    # Filesystem path as a subtitle, so projects sharing a site_name stay
+    # distinct and you can see where each one lives.
+    display_path = repo["local_path"] if "local_path" in repo else repo["name"]
+    home = os.path.expanduser("~")
+    if display_path.startswith(home):
+        display_path = "~" + display_path[len(home):]
     sub_tag = soup.new_tag("div")
     sub_tag["class"] = "mr-sub"
-    sub_tag.string = repo["name"]
+    sub_tag.string = display_path
     card.append(sub_tag)
     if repo.get("description"):
         desc_tag = soup.new_tag("p")
