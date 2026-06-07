@@ -107,6 +107,15 @@ def cli(init, update, build, scan_paths, convert_mdbook):
                 failed_repos.append(repo["name"])
                 continue
 
+            # Some projects have no index.md at their docs root (the nav home is
+            # a sub-page), so no <name>/index.html is produced. Point the card at
+            # the project's first nav page (falling back to the shallowest built
+            # index.html) instead of a 404.
+            if "index_html" not in repo and not os.path.isfile(os.path.join(repo_site_dir, "index.html")):
+                entry = navEntryHtml(repo, repo_site_dir) or findEntryHtml(repo_site_dir)
+                if entry:
+                    repo["index_html"] = entry
+
             if "image" in repo:
                 repo_target_image = os.path.abspath(config["target_dir"] + os.path.sep + repo["image"])
                 os.makedirs(os.path.dirname(repo_target_image), exist_ok=True)
@@ -347,6 +356,76 @@ def getCardGrid(soup, container):
 
     container.append(portal)
     return grid
+
+
+class _TolerantLoader(yaml.SafeLoader):
+    pass
+
+
+# mkdocs.yml routinely uses custom tags (!!python/name, !ENV); ignore them so
+# we can still read the nav.
+_TolerantLoader.add_multi_constructor("", lambda loader, suffix, node: None)
+_TolerantLoader.add_multi_constructor("tag:yaml.org,2002:python/name:",
+                                      lambda loader, suffix, node: None)
+
+
+def _firstNavPage(nav):
+    # Depth-first first markdown path referenced by an mkdocs nav.
+    if isinstance(nav, str):
+        return nav
+    if isinstance(nav, list):
+        for item in nav:
+            page = _firstNavPage(item)
+            if page:
+                return page
+    if isinstance(nav, dict):
+        for value in nav.values():
+            page = _firstNavPage(value)
+            if page:
+                return page
+    return None
+
+
+def navEntryHtml(repo, site_dir):
+    # Resolve a project's first nav page to the built HTML that exists on disk,
+    # handling both use_directory_urls conventions.
+    if "local_path" not in repo:
+        return None
+    cfg = os.path.join(repo["local_path"], repo.get("mkdocs_config", "mkdocs.yml"))
+    if not os.path.isfile(cfg):
+        return None
+    with open(cfg, encoding="utf8") as f:
+        data = yaml.load(f, _TolerantLoader)
+    if not isinstance(data, dict):
+        return None
+    page = _firstNavPage(data.get("nav"))
+    if not page or not page.endswith(".md"):
+        return None
+    directory, filename = os.path.split(page)
+    stem = filename[:-3]
+    if stem in ("index", "README"):
+        candidates = [os.path.join(directory, "index.html")]
+    else:
+        candidates = [os.path.join(directory, stem, "index.html"),
+                      os.path.join(directory, stem + ".html")]
+    for candidate in candidates:
+        candidate = candidate.lstrip(os.sep)
+        if os.path.isfile(os.path.join(site_dir, candidate)):
+            return candidate.replace(os.sep, "/")
+    return None
+
+
+def findEntryHtml(site_dir):
+    # Return the shallowest index.html under site_dir (relative, posix path),
+    # used as a project's landing link when it has no root index.html.
+    best = None
+    for dirpath, _dirnames, filenames in os.walk(site_dir):
+        if "index.html" in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, "index.html"), site_dir)
+            key = (rel.count(os.sep), rel)
+            if best is None or key < best[0]:
+                best = (key, rel)
+    return best[1].replace(os.sep, "/") if best else None
 
 
 def mkdocsDate(repo):
