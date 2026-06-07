@@ -132,7 +132,9 @@ def cli(init, update, build, scan_paths, convert_mdbook):
         for repo in built_repos:
             key = repo["local_path"] if "local_path" in repo else repo["name"]
             if key not in added_state:
-                added_state[key] = today
+                # First time seen: seed from the mkdocs.yml mtime, a realistic
+                # proxy for when the project was added. Sticky afterwards.
+                added_state[key] = mkdocsDate(repo) or today
             repo["date_added"] = added_state[key]
         saveAddedState(added_state_path, added_state)
 
@@ -345,6 +347,16 @@ def getCardGrid(soup, container):
 
     container.append(portal)
     return grid
+
+
+def mkdocsDate(repo):
+    # Date (YYYY-MM-DD) of the project's mkdocs.yml, used to seed "date added".
+    if "local_path" not in repo:
+        return None
+    cfg = os.path.join(repo["local_path"], repo.get("mkdocs_config", "mkdocs.yml"))
+    if not os.path.isfile(cfg):
+        return None
+    return datetime.date.fromtimestamp(os.path.getmtime(cfg)).isoformat()
 
 
 def loadAddedState(path):
