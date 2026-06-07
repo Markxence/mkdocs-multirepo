@@ -110,7 +110,12 @@ layout: cards   # or: list (default)
 ```
 
 - `list` (default): the classic `<ul>/<li>` markup, backward compatible with existing templates and stylesheets.
-- `cards`: a responsive grid of cards, each showing the project's `site_name` as title, its directory name as a subtitle (so projects sharing a `site_name` stay distinct), and its `site_description` as body text. A self-contained stylesheet is injected automatically, so no extra CSS file is required.
+- `cards`: a responsive grid of cards, each showing the project's `site_name` as title, its filesystem path as a subtitle (so projects sharing a `site_name` stay distinct and are easy to locate), its `site_description` as body text, and the date it was first added to the portal. A self-contained stylesheet and a small vanilla-JS toolbar are injected automatically (no extra files), giving:
+  - a **search** box that filters cards by title, path or description,
+  - a **sort** dropdown (title A-Z / Z-A, newest / oldest, path),
+  - **pagination** (12 cards per page).
+
+The "date added" of each project is tracked in a small JSON state file (`.mr-added.json` by default, configurable via the `added_state` key) so it stays stable across rebuilds; a project keeps the date it was first seen.
 
 A `<meta charset="utf-8">` tag is injected into the generated page when missing, so accented titles and dashes render correctly.
 

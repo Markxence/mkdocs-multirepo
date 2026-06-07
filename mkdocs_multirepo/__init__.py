@@ -1,7 +1,9 @@
 import yaml
 import os
 import re
+import json
 import hashlib
+import datetime
 import click
 from bs4 import BeautifulSoup
 from shutil import copy2
@@ -122,6 +124,18 @@ def cli(init, update, build, scan_paths, convert_mdbook):
                 os.makedirs(os.path.dirname(config["target_dir"] + os.path.sep + extrafile), exist_ok=True)
                 copy2(extrafile, config["target_dir"] + os.path.sep + extrafile)
 
+        # Record the first time each project is seen, so cards can show a
+        # stable "date added" instead of a filesystem mtime.
+        added_state_path = config.get("added_state", ".mr-added.json")
+        added_state = loadAddedState(added_state_path)
+        today = datetime.date.today().isoformat()
+        for repo in built_repos:
+            key = repo["local_path"] if "local_path" in repo else repo["name"]
+            if key not in added_state:
+                added_state[key] = today
+            repo["date_added"] = added_state[key]
+        saveAddedState(added_state_path, added_state)
+
         # Generate index.html based on template
         click.echo("Generating landing page ...")
         soup = loadTemplate(config["index_tpl"])
@@ -129,6 +143,7 @@ def cli(init, update, build, scan_paths, convert_mdbook):
         layout = config.get("layout", "list")
         if layout == "cards":
             injectCardStyles(soup)
+            injectCardScripts(soup)
         element = soup.find(id=config["element_id"])
         for repo in built_repos:
             index_html = repo["index_html"] if "index_html" in repo else "index.html"
@@ -250,23 +265,26 @@ def appendListItem(soup, container, repo, href):
     container.ul.insert(1, list_tag)
 
 def appendCard(soup, container, repo, href):
-    # Cards live in a flex/grid wrapper created once per container.
-    grid = container.find("div", class_="mr-grid")
-    if grid is None:
-        grid = soup.new_tag("div")
-        grid["class"] = "mr-grid"
-        container.append(grid)
+    grid = getCardGrid(soup, container)
+    display_path = repo["local_path"] if "local_path" in repo else repo["name"]
+    home = os.path.expanduser("~")
+    if display_path.startswith(home):
+        display_path = "~" + display_path[len(home):]
+    date_added = repo.get("date_added", "")
+
     card = soup.new_tag("a", href=href)
     card["class"] = "mr-card"
+    # Data attributes drive client-side filtering and sorting.
+    card["data-title"] = repo["title"]
+    card["data-path"] = display_path
+    card["data-date"] = date_added
+    card["data-desc"] = repo.get("description", "")
+
     title_tag = soup.new_tag("h3")
     title_tag.string = repo["title"]
     card.append(title_tag)
     # Filesystem path as a subtitle, so projects sharing a site_name stay
     # distinct and you can see where each one lives.
-    display_path = repo["local_path"] if "local_path" in repo else repo["name"]
-    home = os.path.expanduser("~")
-    if display_path.startswith(home):
-        display_path = "~" + display_path[len(home):]
     sub_tag = soup.new_tag("div")
     sub_tag["class"] = "mr-sub"
     sub_tag.string = display_path
@@ -275,12 +293,70 @@ def appendCard(soup, container, repo, href):
         desc_tag = soup.new_tag("p")
         desc_tag.string = repo["description"]
         card.append(desc_tag)
+    footer = soup.new_tag("div")
+    footer["class"] = "mr-meta"
+    if date_added:
+        date_tag = soup.new_tag("span")
+        date_tag["class"] = "mr-date"
+        date_tag.string = "Ajouté le " + date_added
+        footer.append(date_tag)
     if "pdf" in repo:
         pdf_tag = soup.new_tag("span")
         pdf_tag["class"] = "mr-pdf"
         pdf_tag.string = "PDF"
-        card.append(pdf_tag)
+        footer.append(pdf_tag)
+    card.append(footer)
     grid.append(card)
+
+
+def getCardGrid(soup, container):
+    # Each container gets a portal wrapper holding a toolbar (search + sort),
+    # the card grid, and a pager. Created once, reused for every card.
+    portal = container.find("div", class_="mr-portal")
+    if portal is not None:
+        return portal.find("div", class_="mr-grid")
+
+    portal = soup.new_tag("div")
+    portal["class"] = "mr-portal"
+
+    toolbar = soup.new_tag("div")
+    toolbar["class"] = "mr-toolbar"
+    search = soup.new_tag("input", attrs={"type": "search", "class": "mr-search",
+                                          "placeholder": "Filtrer par titre, chemin, description..."})
+    toolbar.append(search)
+    select = soup.new_tag("select")
+    select["class"] = "mr-sort"
+    for value, label in [("title-asc", "Titre A-Z"), ("title-desc", "Titre Z-A"),
+                         ("date-desc", "Plus recents"), ("date-asc", "Plus anciens"),
+                         ("path-asc", "Chemin")]:
+        opt = soup.new_tag("option", value=value)
+        opt.string = label
+        select.append(opt)
+    toolbar.append(select)
+    portal.append(toolbar)
+
+    grid = soup.new_tag("div")
+    grid["class"] = "mr-grid"
+    portal.append(grid)
+
+    pager = soup.new_tag("div")
+    pager["class"] = "mr-pager"
+    portal.append(pager)
+
+    container.append(portal)
+    return grid
+
+
+def loadAddedState(path):
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf8") as f:
+        return json.load(f)
+
+
+def saveAddedState(path, state):
+    with open(path, "w", encoding="utf8") as f:
+        json.dump(state, f, indent=2, sort_keys=True, ensure_ascii=False)
 
 def injectCardStyles(soup):
     # Self-contained default styling so the cards layout looks good with no
@@ -296,14 +372,70 @@ def injectCardStyles(soup):
         "text-decoration:none;color:inherit;background:#fff;transition:box-shadow .15s,transform .15s;}"
         ".mr-card:hover{box-shadow:0 6px 20px rgba(0,0,0,.10);transform:translateY(-2px);}"
         ".mr-card h3{margin:0 0 .15rem;font-size:1.05rem;color:#1c1c1c;}"
-        ".mr-sub{margin:0 0 .5rem;font-size:.72rem;color:#999;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}"
+        ".mr-sub{margin:0 0 .5rem;font-size:.72rem;color:#999;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;}"
         ".mr-card p{margin:0;color:#666;font-size:.9rem;line-height:1.4;}"
-        ".mr-pdf{display:inline-block;margin-top:.6rem;font-size:.72rem;font-weight:600;"
+        ".mr-meta{display:flex;align-items:center;gap:.5rem;margin-top:.7rem;}"
+        ".mr-date{font-size:.72rem;color:#aaa;}"
+        ".mr-pdf{display:inline-block;font-size:.72rem;font-weight:600;"
         "letter-spacing:.04em;color:#a33;border:1px solid #a33;border-radius:4px;padding:.1rem .4rem;}"
+        ".mr-portal{max-width:1100px;margin:0 auto;padding:0 1rem;}"
+        ".mr-toolbar{display:flex;gap:.6rem;flex-wrap:wrap;padding:1rem 0 .2rem;}"
+        ".mr-search{flex:1 1 240px;padding:.55rem .8rem;border:1px solid #ddd;border-radius:8px;font-size:.9rem;}"
+        ".mr-sort{padding:.55rem .8rem;border:1px solid #ddd;border-radius:8px;font-size:.9rem;background:#fff;}"
+        ".mr-pager{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1.2rem 0 2rem;}"
+        ".mr-pager button{padding:.35rem .8rem;border:1px solid #ddd;border-radius:8px;background:#fff;cursor:pointer;font-size:1rem;}"
+        ".mr-pager button:disabled{opacity:.4;cursor:default;}"
+        ".mr-pageinfo{font-size:.82rem;color:#777;}"
         "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#fafafa;margin:0;}"
     )
     if head is not None:
         head.append(style)
+
+def injectCardScripts(soup):
+    # Vanilla client-side filtering, sorting and pagination over the cards.
+    if soup.body is None or "mr-portal-js" in soup.get_text():
+        return
+    script = soup.new_tag("script")
+    script["data-id"] = "mr-portal-js"
+    script.string = (
+        "(function(){var PAGE=12;"
+        "function setup(portal){"
+        "var grid=portal.querySelector('.mr-grid');"
+        "var cards=Array.prototype.slice.call(grid.querySelectorAll('.mr-card'));"
+        "var search=portal.querySelector('.mr-search');"
+        "var sort=portal.querySelector('.mr-sort');"
+        "var pager=portal.querySelector('.mr-pager');"
+        "var page=1;"
+        "function lc(s){return (s||'').toLowerCase();}"
+        "function apply(){"
+        "var q=lc(search.value);"
+        "var f=cards.filter(function(c){var d=c.dataset;"
+        "return lc(d.title).indexOf(q)>=0||lc(d.path).indexOf(q)>=0||lc(d.desc).indexOf(q)>=0;});"
+        "var s=sort.value;"
+        "f.sort(function(a,b){var A=a.dataset,B=b.dataset;"
+        "if(s==='title-asc')return A.title.localeCompare(B.title);"
+        "if(s==='title-desc')return B.title.localeCompare(A.title);"
+        "if(s==='date-desc')return (B.date||'').localeCompare(A.date||'')||A.title.localeCompare(B.title);"
+        "if(s==='date-asc')return (A.date||'').localeCompare(B.date||'')||A.title.localeCompare(B.title);"
+        "if(s==='path-asc')return A.path.localeCompare(B.path);return 0;});"
+        "var pages=Math.max(1,Math.ceil(f.length/PAGE));if(page>pages)page=pages;"
+        "cards.forEach(function(c){c.style.display='none';});"
+        "var start=(page-1)*PAGE;"
+        "f.forEach(function(c,i){grid.appendChild(c);if(i>=start&&i<start+PAGE)c.style.display='';});"
+        "pager.innerHTML='';"
+        "var prev=document.createElement('button');prev.textContent='\\u2039';prev.disabled=page<=1;"
+        "prev.onclick=function(){page--;apply();};"
+        "var info=document.createElement('span');info.className='mr-pageinfo';"
+        "info.textContent=f.length+' projet(s) \\u2014 page '+page+'/'+pages;"
+        "var next=document.createElement('button');next.textContent='\\u203a';next.disabled=page>=pages;"
+        "next.onclick=function(){page++;apply();};"
+        "pager.appendChild(prev);pager.appendChild(info);pager.appendChild(next);}"
+        "search.addEventListener('input',function(){page=1;apply();});"
+        "sort.addEventListener('change',function(){page=1;apply();});"
+        "apply();}"
+        "document.querySelectorAll('.mr-portal').forEach(setup);})();"
+    )
+    soup.body.append(script)
 
 def loadTemplate(index_file):
     templatefile = open(index_file)
