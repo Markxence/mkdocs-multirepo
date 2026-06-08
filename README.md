@@ -113,7 +113,8 @@ layout: cards   # or: list (default)
 - `cards`: a responsive grid of cards, each showing the project's `site_name` as title, its filesystem path as a subtitle (so projects sharing a `site_name` stay distinct and are easy to locate), its `site_description` as body text, and the date it was first added to the portal. A self-contained stylesheet and a small vanilla-JS toolbar are injected automatically (no extra files), giving:
   - a **search** box that filters cards by title, path or description,
   - a **sort** dropdown (title A-Z / Z-A, newest / oldest, path),
-  - **pagination** (12 cards per page).
+  - **pagination** (12 cards per page),
+  - a **favorites** star on each card: starred projects are pinned at the top in a separate "Favoris" section. Favorites are stored per-browser in `localStorage`, so they persist across rebuilds and page reloads without any server.
 
 The "date added" of each project is tracked in a small JSON state file (`.mr-added.json` by default, configurable via the `added_state` key) so it stays stable across rebuilds; a project keeps the date it was first seen.
 

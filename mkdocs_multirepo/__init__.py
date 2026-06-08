@@ -291,6 +291,11 @@ def appendCard(soup, container, repo, href):
     card["data-date"] = date_added
     card["data-desc"] = repo.get("description", "")
 
+    star = soup.new_tag("button", attrs={"class": "mr-star", "type": "button",
+                                         "aria-label": "Marquer comme favori"})
+    star.string = "☆"
+    card.append(star)
+
     title_tag = soup.new_tag("h3")
     title_tag.string = repo["title"]
     card.append(title_tag)
@@ -321,14 +326,27 @@ def appendCard(soup, container, repo, href):
 
 
 def getCardGrid(soup, container):
-    # Each container gets a portal wrapper holding a toolbar (search + sort),
-    # the card grid, and a pager. Created once, reused for every card.
+    # Each container gets a portal wrapper holding a pinned favorites section,
+    # a toolbar (search + sort), the main card grid, and a pager. Created once;
+    # cards are appended to the main grid and moved around client-side.
     portal = container.find("div", class_="mr-portal")
     if portal is not None:
-        return portal.find("div", class_="mr-grid")
+        return portal.find("div", class_="mr-maingrid")
 
     portal = soup.new_tag("div")
     portal["class"] = "mr-portal"
+
+    favsection = soup.new_tag("div")
+    favsection["class"] = "mr-favsection"
+    favsection["style"] = "display:none"
+    favtitle = soup.new_tag("div")
+    favtitle["class"] = "mr-favtitle"
+    favtitle.string = "★ Favoris"
+    favsection.append(favtitle)
+    favgrid = soup.new_tag("div")
+    favgrid["class"] = ["mr-grid", "mr-favgrid"]
+    favsection.append(favgrid)
+    portal.append(favsection)
 
     toolbar = soup.new_tag("div")
     toolbar["class"] = "mr-toolbar"
@@ -347,7 +365,7 @@ def getCardGrid(soup, container):
     portal.append(toolbar)
 
     grid = soup.new_tag("div")
-    grid["class"] = "mr-grid"
+    grid["class"] = ["mr-grid", "mr-maingrid"]
     portal.append(grid)
 
     pager = soup.new_tag("div")
@@ -459,10 +477,18 @@ def injectCardStyles(soup):
     style.string = (
         ".mr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));"
         "gap:1rem;padding:1rem;max-width:1100px;margin:0 auto;}"
-        ".mr-card{display:block;padding:1.1rem 1.2rem;border:1px solid #e2e2e2;border-radius:10px;"
+        ".mr-card{position:relative;display:block;padding:1.1rem 1.2rem;border:1px solid #e2e2e2;border-radius:10px;"
         "text-decoration:none;color:inherit;background:#fff;transition:box-shadow .15s,transform .15s;}"
         ".mr-card:hover{box-shadow:0 6px 20px rgba(0,0,0,.10);transform:translateY(-2px);}"
-        ".mr-card h3{margin:0 0 .15rem;font-size:1.05rem;color:#1c1c1c;}"
+        ".mr-card.is-fav{border-color:#f5b301;box-shadow:0 0 0 1px #f5b301 inset;}"
+        ".mr-star{position:absolute;top:.55rem;right:.6rem;background:none;border:none;padding:0;"
+        "cursor:pointer;font-size:1.25rem;line-height:1;color:#cfcfcf;transition:color .12s,transform .12s;}"
+        ".mr-star:hover{transform:scale(1.18);color:#f5b301;}"
+        ".mr-card.is-fav .mr-star{color:#f5b301;}"
+        ".mr-favsection{max-width:1100px;margin:0 auto;padding:.4rem 1rem 0;}"
+        ".mr-favtitle{font-size:.85rem;font-weight:600;color:#a07800;letter-spacing:.03em;"
+        "padding:.4rem .2rem;border-bottom:1px solid #f0e2bf;margin-bottom:.2rem;}"
+        ".mr-card h3{margin:0 0 .15rem;padding-right:1.4rem;font-size:1.05rem;color:#1c1c1c;}"
         ".mr-sub{margin:0 0 .5rem;font-size:.72rem;color:#999;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;}"
         ".mr-card p{margin:0;color:#666;font-size:.9rem;line-height:1.4;}"
         ".mr-meta{display:flex;align-items:center;gap:.5rem;margin-top:.7rem;}"
@@ -489,38 +515,54 @@ def injectCardScripts(soup):
     script = soup.new_tag("script")
     script["data-id"] = "mr-portal-js"
     script.string = (
-        "(function(){var PAGE=12;"
+        "(function(){var PAGE=12,KEY='mr-favorites';"
+        "function loadFavs(){try{return JSON.parse(localStorage.getItem(KEY))||{};}catch(e){return {};}}"
+        "function saveFavs(f){try{localStorage.setItem(KEY,JSON.stringify(f));}catch(e){}}"
         "function setup(portal){"
-        "var grid=portal.querySelector('.mr-grid');"
+        "var grid=portal.querySelector('.mr-maingrid');"
+        "var favgrid=portal.querySelector('.mr-favgrid');"
+        "var favsection=portal.querySelector('.mr-favsection');"
         "var cards=Array.prototype.slice.call(grid.querySelectorAll('.mr-card'));"
         "var search=portal.querySelector('.mr-search');"
         "var sort=portal.querySelector('.mr-sort');"
         "var pager=portal.querySelector('.mr-pager');"
         "var page=1;"
         "function lc(s){return (s||'').toLowerCase();}"
+        "function keyOf(c){return c.dataset.path||c.getAttribute('href');}"
         "function apply(){"
+        "var favs=loadFavs();"
         "var q=lc(search.value);"
         "var f=cards.filter(function(c){var d=c.dataset;"
         "return lc(d.title).indexOf(q)>=0||lc(d.path).indexOf(q)>=0||lc(d.desc).indexOf(q)>=0;});"
         "var s=sort.value;"
-        "f.sort(function(a,b){var A=a.dataset,B=b.dataset;"
+        "function cmp(a,b){var A=a.dataset,B=b.dataset;"
         "if(s==='title-asc')return A.title.localeCompare(B.title);"
         "if(s==='title-desc')return B.title.localeCompare(A.title);"
         "if(s==='date-desc')return (B.date||'').localeCompare(A.date||'')||A.title.localeCompare(B.title);"
         "if(s==='date-asc')return (A.date||'').localeCompare(B.date||'')||A.title.localeCompare(B.title);"
-        "if(s==='path-asc')return A.path.localeCompare(B.path);return 0;});"
-        "var pages=Math.max(1,Math.ceil(f.length/PAGE));if(page>pages)page=pages;"
-        "cards.forEach(function(c){c.style.display='none';});"
+        "if(s==='path-asc')return A.path.localeCompare(B.path);return 0;}"
+        "f.sort(cmp);"
+        "cards.forEach(function(c){var on=!!favs[keyOf(c)];c.classList.toggle('is-fav',on);"
+        "var st=c.querySelector('.mr-star');if(st)st.textContent=on?'\\u2605':'\\u2606';"
+        "c.style.display='none';});"
+        "var favList=f.filter(function(c){return favs[keyOf(c)];});"
+        "var normList=f.filter(function(c){return !favs[keyOf(c)];});"
+        "favList.forEach(function(c){favgrid.appendChild(c);c.style.display='';});"
+        "favsection.style.display=favList.length?'':'none';"
+        "var pages=Math.max(1,Math.ceil(normList.length/PAGE));if(page>pages)page=pages;"
         "var start=(page-1)*PAGE;"
-        "f.forEach(function(c,i){grid.appendChild(c);if(i>=start&&i<start+PAGE)c.style.display='';});"
+        "normList.forEach(function(c,i){grid.appendChild(c);if(i>=start&&i<start+PAGE)c.style.display='';});"
         "pager.innerHTML='';"
         "var prev=document.createElement('button');prev.textContent='\\u2039';prev.disabled=page<=1;"
         "prev.onclick=function(){page--;apply();};"
         "var info=document.createElement('span');info.className='mr-pageinfo';"
-        "info.textContent=f.length+' projet(s) \\u2014 page '+page+'/'+pages;"
+        "info.textContent=normList.length+' projet(s)'+(favList.length?' (+ '+favList.length+' favori(s))':'')+' \\u2014 page '+page+'/'+pages;"
         "var next=document.createElement('button');next.textContent='\\u203a';next.disabled=page>=pages;"
         "next.onclick=function(){page++;apply();};"
         "pager.appendChild(prev);pager.appendChild(info);pager.appendChild(next);}"
+        "cards.forEach(function(c){var st=c.querySelector('.mr-star');if(!st)return;"
+        "st.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();"
+        "var favs=loadFavs(),k=keyOf(c);if(favs[k])delete favs[k];else favs[k]=1;saveFavs(favs);apply();});});"
         "search.addEventListener('input',function(){page=1;apply();});"
         "sort.addEventListener('change',function(){page=1;apply();});"
         "apply();}"
